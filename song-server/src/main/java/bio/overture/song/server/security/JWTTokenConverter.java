@@ -5,6 +5,7 @@ import static bio.overture.song.core.exceptions.ServerException.buildServerExcep
 import static bio.overture.song.core.utils.Joiners.WHITESPACE;
 import static bio.overture.song.server.oauth.ExpiringOauth2Authentication.from;
 
+import bio.overture.song.core.exceptions.ServerException;
 import bio.overture.song.core.utils.JsonUtils;
 import bio.overture.song.server.model.JWTApplication;
 import bio.overture.song.server.model.JWTUser;
@@ -23,6 +24,9 @@ import lombok.val;
 import org.springframework.security.oauth2.provider.OAuth2Authentication;
 import org.springframework.security.oauth2.provider.token.store.JwtAccessTokenConverter;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.lang.System.currentTimeMillis;
+
 @Slf4j
 public class JWTTokenConverter extends JwtAccessTokenConverter {
 
@@ -36,12 +40,36 @@ public class JWTTokenConverter extends JwtAccessTokenConverter {
   private static final String CONTEXT_APPLICATION_FIELD_NAME = CONTEXT + "." + APPLICATION;
   private static final String CONTEXT_SCOPE_FIELD_NAME = CONTEXT + "." + SCOPE;
 
+  private final PublicKeyStore publicKeyStore;
+
   @SneakyThrows
-  public JWTTokenConverter(@NonNull String publicKey) {
+  public JWTTokenConverter(@NonNull PublicKeyStore publicKeyStore) {
     super();
-    this.setVerifierKey(publicKey);
-    this.afterPropertiesSet();
+    this.publicKeyStore = publicKeyStore;
   }
+
+  //TODO: change this, by making an empty override, and then manually do the validation as a Webfilter.
+  // In the event the Auth server is not running yet, we want Song to still be able to run, however any request with a JWT will fail.
+  // By intercepting the request, and doing what super.afterPropertiesSet() does in the WebFilter, you will be able to do the "self healing" thing. Essentially, you are validating the public key and testing it works correctly for any request that gets a validation error.
+  /**
+   * Lazily update the public key cache. If there is an error fetching the key or if the jwt is not valid
+   * @throws Exception
+   */
+  @Override
+  public void afterPropertiesSet() throws Exception {
+    String candidatePublicKey = publicKeyStore.read();
+    try{
+      this.setVerifierKey(candidatePublicKey);
+      super.afterPropertiesSet();
+    } catch (Exception e){
+      candidatePublicKey = publicKeyStore.updateAndRead();
+      synchronized (this){
+        this.setVerifierKey(candidatePublicKey);
+        super.afterPropertiesSet();
+      }
+    }
+  }
+
 
   @Override
   public OAuth2Authentication extractAuthentication(Map<String, ?> map) {
@@ -64,7 +92,7 @@ public class JWTTokenConverter extends JwtAccessTokenConverter {
   }
 
   private static long calcSecondsUntilExpiry(Long expirationTimestamp) {
-    val diff = expirationTimestamp - TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis());
+    val diff = expirationTimestamp - MILLISECONDS.toSeconds(currentTimeMillis());
     return diff > 0 ? diff : 0;
   }
 
@@ -78,10 +106,9 @@ public class JWTTokenConverter extends JwtAccessTokenConverter {
     if (map.containsKey(CONTEXT)) {
       return (Map<String, ?>) map.get(CONTEXT);
     }
-    val timestamp = System.currentTimeMillis();
+    val timestamp = currentTimeMillis();
     log.error("[@{}] JWTToken is missing '{}' field", CONTEXT, timestamp);
-    throw buildServerException(
-        JWTTokenConverter.class, UNAUTHORIZED_TOKEN, "[@%s] Token is not authorized", timestamp);
+    throw buildUnauthorizedTokenException(timestamp);
   }
 
   @SuppressWarnings("unchecked")
@@ -92,10 +119,9 @@ public class JWTTokenConverter extends JwtAccessTokenConverter {
       val egoScopes = (List<String>) context.get(SCOPE);
       mutatedMap.put(SCOPE, WHITESPACE.join(egoScopes));
     } else {
-      val timestamp = System.currentTimeMillis();
+      val timestamp = currentTimeMillis();
       log.error("[@{}] JWTToken is missing '{}' field", CONTEXT_SCOPE_FIELD_NAME, timestamp);
-      throw buildServerException(
-          JWTTokenConverter.class, UNAUTHORIZED_TOKEN, "[@%s] Token is not authorized", timestamp);
+      throw buildUnauthorizedTokenException(timestamp);
     }
     return mutatedMap;
   }
@@ -105,17 +131,13 @@ public class JWTTokenConverter extends JwtAccessTokenConverter {
         .or(() -> parseContextApplication(map))
         .orElseThrow(
             () -> {
-              val timestamp = System.currentTimeMillis();
+              val timestamp = currentTimeMillis();
               log.error(
-                  "[@{}] JWT Token must have at least one field of: {}, {}",
+                  "[@{}] JWT Token must have at least one the following fields: {}, {}",
                   CONTEXT_USER_FIELD_NAME,
                   CONTEXT_APPLICATION_FIELD_NAME,
                   timestamp);
-              throw buildServerException(
-                  JWTTokenConverter.class,
-                  UNAUTHORIZED_TOKEN,
-                  "[@%s] Token is not authorized",
-                  timestamp);
+              throw buildUnauthorizedTokenException(timestamp);
             });
   }
 
@@ -136,4 +158,9 @@ public class JWTTokenConverter extends JwtAccessTokenConverter {
     }
     return Optional.empty();
   }
+
+  private static ServerException buildUnauthorizedTokenException(long timestamp){
+    return buildServerException( JWTTokenConverter.class, UNAUTHORIZED_TOKEN, "[@%s] Token is not authorized", timestamp);
+  }
+
 }

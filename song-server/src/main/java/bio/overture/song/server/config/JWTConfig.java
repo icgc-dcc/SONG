@@ -2,12 +2,14 @@ package bio.overture.song.server.config;
 
 import bio.overture.song.server.security.CustomResourceServerTokenServices;
 import bio.overture.song.server.security.JWTTokenConverter;
+import bio.overture.song.server.security.PublicKeyStore;
 import lombok.NonNull;
 import lombok.val;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.ResponseEntity;
 import org.springframework.retry.support.RetryTemplate;
@@ -26,7 +28,7 @@ public class JWTConfig {
   public JWTConfig(
       @NonNull @Value("${auth.jwt.public-key-url}") String publicKeyUrl,
       @NonNull RemoteTokenServices remoteTokenServices,
-      @NonNull RetryTemplate retryTemplate) {
+      @NonNull RetryTemplate retryTemplate){
     this.publicKeyUrl = publicKeyUrl;
     this.retryTemplate = retryTemplate;
     this.remoteTokenServices = remoteTokenServices;
@@ -34,17 +36,18 @@ public class JWTConfig {
 
   @Bean
   @Primary
-  public CustomResourceServerTokenServices customResourceServerTokenServices() {
+  public CustomResourceServerTokenServices customResourceServerTokenServices(@Autowired JWTTokenConverter jwtTokenConverter) {
     return new CustomResourceServerTokenServices(
-        remoteTokenServices, buildJwtTokenStore(), retryTemplate);
+        remoteTokenServices, buildJwtTokenStore(jwtTokenConverter), retryTemplate);
   }
 
-  private JwtTokenStore buildJwtTokenStore() {
-    return new JwtTokenStore(buildJwtTokenConverter());
+  private JwtTokenStore buildJwtTokenStore(JWTTokenConverter jwtTokenConverter) {
+    return new JwtTokenStore(jwtTokenConverter);
   }
 
-  private JWTTokenConverter buildJwtTokenConverter() {
-    return new JWTTokenConverter(getPublicKey());
+  @Bean
+  public JWTTokenConverter jwtTokenConverter() {
+    return new JWTTokenConverter(publicKeyFetcher());
   }
 
   // TODO: rtisma --- ideally, this public key fetching is more dynamic. For instance, if EGO
@@ -60,5 +63,9 @@ public class JWTConfig {
     ResponseEntity<String> response =
         retryTemplate.execute(x -> rest.getForEntity(publicKeyUrl, String.class));
     return response.getBody();
+  }
+
+  public PublicKeyStore publicKeyFetcher(){
+    return new PublicKeyStore(publicKeyUrl, new RestTemplate(), retryTemplate);
   }
 }
